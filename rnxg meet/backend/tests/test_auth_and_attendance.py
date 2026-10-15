@@ -11,7 +11,7 @@ backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if backend_path not in sys.path:
     sys.path.insert(0, backend_path)
 
-from app.main import app, Base, get_db, User, Meeting, Attendance
+from app.main import app, Base, get_db, User, Meeting, Attendance, password_hash
 
 TEST_DATABASE_URL = "sqlite:///:memory:"
 test_engine = create_engine(
@@ -162,8 +162,10 @@ def test_6_dashboard_access_without_authentication(client):
     """Test 6: Protected dashboard routes return 401 when accessed without authentication."""
     assert client.get("/api/auth/me").status_code == 401
     assert client.get("/api/meetings/upcoming").status_code == 401
+    assert client.get("/api/meetings/past").status_code == 401
     assert client.get("/api/attendance/summary").status_code == 401
     assert client.get("/api/attendance/history").status_code == 401
+    assert client.get("/api/admin/overview").status_code == 401
 
 
 def test_7_dashboard_access_after_sign_in(client):
@@ -187,6 +189,10 @@ def test_7_dashboard_access_after_sign_in(client):
     meetings_res = client.get("/api/meetings/upcoming")
     assert meetings_res.status_code == 200
     assert isinstance(meetings_res.json(), list)
+
+    past_res = client.get("/api/meetings/past")
+    assert past_res.status_code == 200
+    assert isinstance(past_res.json(), list)
 
     summary_res = client.get("/api/attendance/summary")
     assert summary_res.status_code == 200
@@ -282,3 +288,81 @@ def test_11_backend_safe_error_responses(client):
     assert "detail" in data
     assert "traceback" not in str(data).lower()
     assert "sqlite" not in str(data).lower()
+
+
+def test_12_member_cannot_access_admin_endpoints(client):
+    """Test 12: Regular members receive 403 Forbidden when calling admin APIs."""
+    # Register regular member
+    reg = client.post(
+        "/api/auth/register",
+        json={
+            "name": "Normal Member",
+            "email": "member_norm@rnxg.org",
+            "password": "ValidPassword999!",
+        },
+    )
+    assert reg.status_code == 201
+    assert reg.json()["role"] == "MEMBER"
+
+    # Access admin overview -> 403
+    res_ov = client.get("/api/admin/overview")
+    assert res_ov.status_code == 403
+    assert "denied" in res_ov.json()["detail"].lower() or "administrator" in res_ov.json()["detail"].lower()
+
+    # Access admin members -> 403
+    res_mem = client.get("/api/admin/members")
+    assert res_mem.status_code == 403
+
+    # Access admin meetings -> 403
+    res_meet = client.get("/api/admin/meetings")
+    assert res_meet.status_code == 403
+
+    # Access admin attendance -> 403
+    res_att = client.get("/api/admin/attendance")
+    assert res_att.status_code == 403
+
+
+def test_13_admin_access_and_safe_data_exposure(client):
+    """Test 13: Authorized Admin can access all admin endpoints and data is safe (no password_hash)."""
+    with TestingSessionLocal() as db:
+        admin_user = User(
+            name="Club Admin",
+            email="admin@rnxg.org",
+            password_hash=password_hash.hash("AdminPassword123!"),
+            attendance_id="RNXG-ADM001",
+            role="ADMIN",
+            is_active=True,
+        )
+        db.add(admin_user)
+        db.commit()
+
+    # Login as admin
+    login_res = client.post(
+        "/api/auth/login",
+        json={"email": "admin@rnxg.org", "password": "AdminPassword123!"},
+    )
+    assert login_res.status_code == 200
+    assert login_res.json()["role"] == "ADMIN"
+
+    # Access admin overview
+    ov_res = client.get("/api/admin/overview")
+    assert ov_res.status_code == 200
+    ov_data = ov_res.json()
+    assert "total_members" in ov_data
+    assert "pending_approvals" in ov_data
+    assert ov_data["total_members"] >= 1
+
+    # Access admin members
+    mem_res = client.get("/api/admin/members")
+    assert mem_res.status_code == 200
+    members = mem_res.json()
+    assert len(members) >= 1
+    for m in members:
+        assert "password_hash" not in m
+        assert "email" in m
+        assert "attendance_id" in m
+        assert "role" in m
+
+    # Access admin meetings and attendance
+    assert client.get("/api/admin/meetings").status_code == 200
+    assert client.get("/api/admin/attendance").status_code == 200
